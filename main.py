@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 from __future__ import print_function
@@ -7,8 +7,7 @@ import os
 import configparser
 import sqlite3
 import shlex
-import queue
-import threading
+import time
 
 import youtube_dl
 
@@ -51,14 +50,24 @@ class Sync(object):
 
     def _proc_(self, ydl):
         ie = ydl.extract_info(self.opts['url'], download=False, process=False)
+        if ie['_type'] == 'url':
+            ie = ydl.extract_info(ie['url'], download=False, process=False)
         if 'entries' not in ie:
+            print(ie)
             raise RuntimeError('Unsupported url: %s' % self.opts['url'])
-        for entry in ie['entries']:
-            if self.db.get_history(entry):
-                print("SKIPPED", entry)
-                continue
-            ydl.process_ie_result(entry)
-            self.db.insert(entry)
+        entries = list(ie['entries'])
+        failures = 0
+        for entry in entries:
+            try:
+                if self.db.get_history(entry):
+                    continue
+                ydl.process_ie_result(entry)
+                self.db.insert(entry)
+            except Exception as e:
+                print(e)
+                failures += 1
+        if failures > len(entries) / 4:
+            raise Exception('Too many failures')
 
 
 class DB(object):
@@ -108,7 +117,7 @@ def main():
         'postprocessors': postprocessors,
         'writethumbnail': True,
         # 'postprocessor_args': shlex.split('-vn -c:a libfdk_aac -b:a 264k'),
-        'postprocessor_args': shlex.split('-vn -b:a 264k'),
+        'postprocessor_args': shlex.split('-vn -b:a 264k -strict -2'),
     }
 
     syncs = [
@@ -117,29 +126,12 @@ def main():
         if name not in {'global', 'DEFAULT'}
     ]
 
-    q = queue.Queue()
     for name, opts in manifests.items():
         if name in {'global', 'DEFAULT'}:
             continue
-        q.put(Sync(name, opts, db))
-
-    def run():
-        try:
-            while True:
-                s = q.get(block=False)
-                s.run(ydl_opts)
-        except queue.Empty:
-            pass
-
-    threads = []
-    for i in range(5):
-        t = threading.Thread(target=run)
-        t.run()
-        threads += t
-
-    q.join()
-    for t in threads:
-        t.join()
+        s = Sync(name, opts, db)
+        s.run(ydl_opts)
+        time.sleep(10)
 
 
 if __name__ == '__main__':
