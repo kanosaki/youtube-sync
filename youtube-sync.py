@@ -9,8 +9,12 @@ import sqlite3
 import shlex
 import time
 from urllib.parse import urlparse
+import subprocess
 
 import youtube_dl
+import youtube_dl.utils
+import youtube_dl.postprocessor
+import youtube_dl.postprocessor.common
 
 default_output_dir = '.'
 
@@ -20,6 +24,29 @@ def dict_factory(cursor, row):
     for idx, col in enumerate(cursor.description):
         d[col[0]] = row[idx]
     return d
+
+
+# Fix thumbnail image for AtomicPersley (Niconico will unsupported jpeg)
+class FixThumbnailPP(youtube_dl.postprocessor.common.PostProcessor):
+    def __init__(self, downloader):
+        super(FixThumbnailPP, self).__init__(downloader)
+
+    def run(self, info):
+        if len(info['thumbnails']) == 0:
+            return [], info
+        convert_from = youtube_dl.utils.encodeFilename(info['thumbnails'][0]['filename'])
+        convert_to_raw = '{}.png'.format(info['thumbnails'][0]['filename'])
+        convert_to = youtube_dl.utils.encodeFilename(convert_to_raw)
+        cmd = "convert '{}' '{}'".format(convert_from, convert_to)
+        self._downloader.to_screen('[fix_thumb] %s' % cmd)
+        retCode = subprocess.call(youtube_dl.utils.encodeArgument(cmd), shell=True)
+        if retCode != 0:
+            raise youtube_dl.postprocessor.common.PostProcessingError(
+                'Command returned error code %d' % retCode)
+        info['thumbnails'][0]['filename'] = convert_to_raw  # overwrite thumbnail for embedding
+        return [convert_from], info
+
+setattr(youtube_dl.postprocessor, 'FixThumbnailPP', FixThumbnailPP)
 
 
 class cd:
@@ -63,12 +90,12 @@ class Sync(object):
                 tpl = self.db.get_history(entry)
                 if tpl and tpl['state'] != 2:  # Found and failed
                     continue
-                ydl.process_ie_result(entry)
-                self.db.insert(entry, 0)  # Succeed
+                res = ydl.process_ie_result(entry)
+                self.db.insert(self.name, entry, 0)  # Succeed
             except Exception as e:
                 print('process_ie_result failed', e)
                 failures += 1
-                self.db.insert(entry, 1)  # Failed
+                self.db.insert(self.name, entry, 1)  # Failed
         if failures > len(entries) / 4:
             raise Exception('Too many failures')
 
@@ -82,6 +109,7 @@ class DB(object):
             'CREATE TABLE IF NOT EXISTS '
             'history ('
             '  id TEXT, '
+            '  grp TEXT'
             '  extractor TEXT,'
             '  caption TEXT, '
             '  state INTEGER, '  # NULL or 0 : default, no problem. 1 : failed  2: requesting retry
@@ -103,10 +131,10 @@ class DB(object):
         return self.db.execute('SELECT timestamp, state FROM history WHERE id = ? AND extractor = ?',
                                (id, ie_key)).fetchone()
 
-    def insert(self, entry, state):
+    def insert(self, group, entry, state):
         id, ie_key, title = self._extract_infos(entry)
-        self.db.execute('INSERT INTO history(id, extractor, caption, state) VALUES (?, ?, ?, ?)',
-                        (id, ie_key, title, state))
+        self.db.execute('INSERT INTO history(id, grp, extractor, caption, state) VALUES (?, ?, ?, ?, ?)',
+                        (id, group, ie_key, title, state))
         self.db.commit()
 
 
@@ -124,6 +152,7 @@ def main():
         'preferredcodec': 'm4a',
     })
     postprocessors.append({'key': 'FFmpegMetadata'})
+    postprocessors.append({'key': 'FixThumbnail'})
     postprocessors.append({
         'key': 'EmbedThumbnail',
         'already_have_thumbnail': False,
