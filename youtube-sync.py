@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 from __future__ import print_function
@@ -8,6 +8,7 @@ import configparser
 import sqlite3
 import shlex
 import time
+from urllib.parse import urlparse
 
 import youtube_dl
 
@@ -53,19 +54,21 @@ class Sync(object):
         if ie['_type'] == 'url':
             ie = ydl.extract_info(ie['url'], download=False, process=False)
         if 'entries' not in ie:
-            print(ie)
+            print('entries not found', ie)
             raise RuntimeError('Unsupported url: %s' % self.opts['url'])
         entries = list(ie['entries'])
         failures = 0
         for entry in entries:
             try:
-                if self.db.get_history(entry):
+                tpl = self.db.get_history(entry)
+                if tpl and tpl['state'] != 2:  # Found and failed
                     continue
                 ydl.process_ie_result(entry)
-                self.db.insert(entry)
+                self.db.insert(entry, 0)  # Succeed
             except Exception as e:
-                print(e)
+                print('process_ie_result failed', e)
                 failures += 1
+                self.db.insert(entry, 1)  # Failed
         if failures > len(entries) / 4:
             raise Exception('Too many failures')
 
@@ -81,17 +84,29 @@ class DB(object):
             '  id TEXT, '
             '  extractor TEXT,'
             '  caption TEXT, '
+            '  state INTEGER, '  # NULL or 0 : default, no problem. 1 : failed  2: requesting retry
             '  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,'
             '  PRIMARY KEY (id, extractor))'
         )
 
-    def get_history(self, entry):
-        return self.db.execute('SELECT timestamp FROM history WHERE id = ? AND extractor = ?',
-                               (entry['id'], entry['ie_key'])).fetchone()
+    def _extract_infos(self, entry):
+        ie_key = entry['ie_key']
+        if ie_key == 'Niconico':
+            id = os.path.basename(urlparse(entry['url']).path)  # use 'sm123456' part as
+            return id, entry['ie_key'], id
 
-    def insert(self, entry):
-        self.db.execute('INSERT INTO history(id, extractor, caption) VALUES (?, ?, ?)',
-                        (entry['id'], entry['ie_key'], entry['title']))
+        elif ie_key == 'Youtube':
+            return entry['id'], entry['ie_key'], entry['title']
+
+    def get_history(self, entry):
+        id, ie_key, _ = self._extract_infos(entry)
+        return self.db.execute('SELECT timestamp, state FROM history WHERE id = ? AND extractor = ?',
+                               (id, ie_key)).fetchone()
+
+    def insert(self, entry, state):
+        id, ie_key, title = self._extract_infos(entry)
+        self.db.execute('INSERT INTO history(id, extractor, caption, state) VALUES (?, ?, ?, ?)',
+                        (id, ie_key, title, state))
         self.db.commit()
 
 
@@ -114,17 +129,12 @@ def main():
         'already_have_thumbnail': False,
     })
     ydl_opts = {
+        'usenetrc': True,
         'postprocessors': postprocessors,
         'writethumbnail': True,
         # 'postprocessor_args': shlex.split('-vn -c:a libfdk_aac -b:a 264k'),
         'postprocessor_args': shlex.split('-vn -b:a 264k -strict -2'),
     }
-
-    syncs = [
-        Sync(name, opts, db)
-        for name, opts in manifests.items()
-        if name not in {'global', 'DEFAULT'}
-    ]
 
     for name, opts in manifests.items():
         if name in {'global', 'DEFAULT'}:
