@@ -26,7 +26,7 @@ def dict_factory(cursor, row):
     return d
 
 
-# Fix thumbnail image for AtomicPersley (Niconico will unsupported jpeg)
+# Fix thumbnail image for AtomicPersley (Niconico will returns unsupported jpeg, so convert to png in advance)
 class FixThumbnailPP(youtube_dl.postprocessor.common.PostProcessor):
     def __init__(self, downloader):
         super(FixThumbnailPP, self).__init__(downloader)
